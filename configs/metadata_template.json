@@ -1,0 +1,73 @@
+{
+  "required_columns": [
+    "doc_id",
+    "filename",
+    "source_path",
+    "title",
+    "course_program",
+    "faculty_career",
+    "year",
+    "semester",
+    "source_type",
+    "authority_level",
+    "rights_status",
+    "page_count",
+    "ocr_quality",
+    "status"
+  ],
+  "required_non_empty": [
+    "doc_id",
+    "filename",
+    "source_path",
+    "title",
+    "course_program",
+    "faculty_career",
+    "source_type",
+    "authority_level",
+    "rights_status",
+    "status"
+  ],
+  "allowed_values": {
+    "rights_status": [
+      "open",
+      "restricted",
+      "unknown"
+    ],
+    "ocr_quality": [
+      "unknown",
+      "good",
+      "usable_with_caution",
+      "poor",
+      "failed"
+    ],
+    "status": [
+      "ready",
+      "needs_review",
+      "excluded"
+    ]
+  },
+  "defaults": {
+    "doc_id_prefix": "UCH-ODO-ENDO",
+    "course_program": "Endodoncia",
+    "faculty_career": "Odontologia",
+    "source_type": "guia/apunte",
+    "authority_level": "homogenea",
+    "rights_status": "open",
+    "ocr_quality": "unknown",
+    "status": "ready",
+    "year": "",
+    "semester": ""
+  },
+  "ocr_policy": {
+    "moment_1_inventory_default": "unknown",
+    "moment_2_required_before_chunking": [
+      "good",
+      "usable_with_caution"
+    ],
+    "blocked_before_chunking": [
+      "poor",
+      "failed",
+      "unknown"
+    ]
+  }
+}
