@@ -5,7 +5,10 @@ import argparse
 import csv
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
+
+from rag.ingest import HEADING_RE
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,14 +59,114 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Line-level text structure. pypdf output has no blank lines between paragraphs, so a
+# paragraph ends at a line that ends a sentence, at a list item, or at a heading.
+SENTENCE_END_RE = re.compile(r"[.!?:;»\")]$")
+LIST_ITEM_RE = re.compile(r"^(?:[-•●▪*·]\s|\d+[.)]\s|[a-z]\)\s|paso\s+\d+\b)", re.IGNORECASE)
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+MAX_HEADING_CHARS = 120
+
+
+@dataclass(frozen=True)
+class Block:
+    text: str
+    is_heading: bool
+
+
 def estimate_tokens(text: str) -> int:
     return len(re.findall(r"\S+", text))
 
 
+def _join_lines(lines: list[str]) -> str:
+    joined = ""
+    for line in lines:
+        if joined.endswith("-") and line[:1].islower():
+            joined += line  # "químico-" + "mecánica": keep the hyphen, drop the break
+        elif joined:
+            joined += " " + line
+        else:
+            joined = line
+    return re.sub(r"\s+", " ", joined).strip()
+
+
+def is_heading(line: str) -> bool:
+    return len(line) <= MAX_HEADING_CHARS and bool(HEADING_RE.match(line))
+
+
+def split_blocks(text: str, line_is_paragraph: bool = False) -> list[Block]:
+    """Split page text into heading and paragraph blocks.
+
+    With line_is_paragraph (DOCX extraction), every line is already a paragraph.
+    """
+    blocks: list[Block] = []
+    buffer: list[str] = []
+
+    def flush() -> None:
+        if buffer:
+            joined = _join_lines(buffer)
+            if joined:
+                blocks.append(Block(joined, is_heading=False))
+            buffer.clear()
+
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            flush()
+            continue
+        if is_heading(line):
+            flush()
+            blocks.append(Block(re.sub(r"\s+", " ", line), is_heading=True))
+            continue
+        if LIST_ITEM_RE.match(line):
+            flush()
+        buffer.append(line)
+        if line_is_paragraph or SENTENCE_END_RE.search(line):
+            flush()
+    flush()
+    return blocks
+
+
 def split_paragraphs(text: str) -> list[str]:
-    parts = re.split(r"\n\s*\n+", text or "")
-    cleaned = [re.sub(r"\s+", " ", p).strip() for p in parts]
-    return [p for p in cleaned if p]
+    return [block.text for block in split_blocks(text)]
+
+
+def split_to_limits(text: str, first_limit: int, limit: int) -> list[str]:
+    """Split text into pieces of at most first_limit, then limit, tokens.
+
+    Breaks at sentence boundaries; a single sentence longer than the limit is cut by words.
+    """
+    first_limit = max(first_limit, 1)
+    if estimate_tokens(text) <= first_limit:
+        return [text]
+
+    pieces: list[str] = []
+    current: list[str] = []
+    current_tokens = 0
+
+    def budget() -> int:
+        return first_limit if not pieces else limit
+
+    def emit() -> None:
+        nonlocal current, current_tokens
+        if current:
+            pieces.append(" ".join(current))
+            current, current_tokens = [], 0
+
+    for sentence in SENTENCE_SPLIT_RE.split(text):
+        words = sentence.split()
+        if not words:
+            continue
+        if current_tokens + len(words) > budget():
+            emit()
+        while len(words) > budget():
+            cut = budget()
+            pieces.append(" ".join(words[:cut]))
+            words = words[cut:]
+        if words:
+            current.append(" ".join(words))
+            current_tokens += len(words)
+    emit()
+    return pieces
 
 
 def read_inventory(path: Path) -> dict[str, dict[str, str]]:
@@ -111,81 +214,82 @@ def chunk_document(
     min_tokens: int,
     max_tokens: int,
 ) -> list[dict[str, object]]:
+    """Group heading/paragraph blocks into chunks of at most max_tokens.
+
+    - A heading always starts a new chunk and becomes its section_title; the section
+      carries over to following pages until the next heading.
+    - A chunk continues onto the next page when pages are contiguous, so steps that
+      straddle a page break stay together. An empty page in between ends the chunk.
+    - Paragraphs longer than max_tokens are split at sentence boundaries.
+    - min_tokens is a soft target: chunks only come out shorter at a heading, a page
+      gap, the end of the document, or before a paragraph that would overflow max_tokens.
+    """
+    del min_tokens  # see docstring; kept for CLI and caller compatibility
     pages = doc_json.get("pages", [])
     if not isinstance(pages, list):
         return []
+    line_is_paragraph = str(doc_json.get("extraction_method", "")).startswith("docx")
 
     chunks: list[dict[str, object]] = []
-    current_parts: list[str] = []
-    current_tokens = 0
-    current_page_start = 0
-    current_page_end = 0
-    current_section = ""
+    parts: list[str] = []
+    tokens = 0
+    page_start = page_end = 0
+    has_body = False
+    section = ""
+    chunk_section = ""
+
+    def add(text: str, page_num: int, body: bool) -> None:
+        nonlocal tokens, page_start, page_end, has_body, chunk_section
+        if not parts:
+            page_start = page_num
+            chunk_section = section
+        parts.append(text)
+        tokens += estimate_tokens(text)
+        page_end = page_num
+        has_body = has_body or body
+
+    def flush() -> None:
+        nonlocal parts, tokens, page_start, page_end, has_body
+        if has_body:
+            finalize_chunk(
+                chunks=chunks,
+                doc_meta=doc_meta,
+                doc_json=doc_json,
+                text_parts=parts,
+                page_start=page_start,
+                page_end=page_end,
+                section_title=chunk_section,
+            )
+        parts, tokens, page_start, page_end, has_body = [], 0, 0, 0, False
 
     for page_obj in pages:
         if not isinstance(page_obj, dict):
             continue
         page_num = int(page_obj.get("page", 0) or 0)
-        page_text = str(page_obj.get("text", "") or "")
-        page_sections = page_obj.get("sections", [])
-        page_section_title = ""
-        if isinstance(page_sections, list) and page_sections:
-            page_section_title = str(page_sections[0] or "").strip()
-
-        paragraphs = split_paragraphs(page_text)
-        if not paragraphs:
+        blocks = split_blocks(str(page_obj.get("text", "") or ""), line_is_paragraph)
+        if not blocks:
             continue
+        if parts and page_num != page_end + 1:
+            flush()  # never merge across a gap in the page sequence
 
-        for paragraph in paragraphs:
-            paragraph_tokens = estimate_tokens(paragraph)
-            if paragraph_tokens == 0:
+        for block in blocks:
+            if block.is_heading:
+                if has_body:
+                    flush()
+                section = block.text
+                if not has_body:
+                    chunk_section = section
+                add(block.text, page_num, body=False)
                 continue
 
-            section_switch = bool(
-                page_section_title and current_section and page_section_title != current_section
-            )
-            page_switch = bool(current_page_end and page_num != current_page_end)
-            would_exceed = current_tokens + paragraph_tokens > max_tokens
+            pending_heading_tokens = 0 if has_body else tokens
+            pieces = split_to_limits(block.text, max_tokens - pending_heading_tokens, max_tokens)
+            for piece in pieces:
+                if has_body and tokens + estimate_tokens(piece) > max_tokens:
+                    flush()
+                add(piece, page_num, body=True)
 
-            if current_parts and (
-                section_switch or page_switch or (would_exceed and current_tokens >= min_tokens)
-            ):
-                finalize_chunk(
-                    chunks=chunks,
-                    doc_meta=doc_meta,
-                    doc_json=doc_json,
-                    text_parts=current_parts,
-                    page_start=current_page_start,
-                    page_end=current_page_end,
-                    section_title=current_section,
-                )
-                current_parts = []
-                current_tokens = 0
-                current_page_start = 0
-                current_page_end = 0
-                current_section = ""
-
-            if not current_parts:
-                current_page_start = page_num
-                current_section = page_section_title or current_section
-
-            current_parts.append(paragraph)
-            current_tokens += paragraph_tokens
-            current_page_end = page_num
-            if page_section_title and not current_section:
-                current_section = page_section_title
-
-    if current_parts:
-        finalize_chunk(
-            chunks=chunks,
-            doc_meta=doc_meta,
-            doc_json=doc_json,
-            text_parts=current_parts,
-            page_start=current_page_start,
-            page_end=current_page_end,
-            section_title=current_section,
-        )
-
+    flush()
     return chunks
 
 
