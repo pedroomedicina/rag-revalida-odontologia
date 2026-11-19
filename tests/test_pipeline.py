@@ -97,7 +97,6 @@ def test_near_duplicate_resave_is_reported(prep_run):
     assert cleanup["near_duplicate_pdf_resave"]["candidate_pairs_count"] >= 1
 
 
-@pytest.mark.known_bug("chunker flushes on every page, splitting procedures across pages")
 def test_procedure_spanning_pages_stays_in_one_chunk(prep_run):
     doc_id = prep_run.row_for("guia_endodoncia_-_medicacion")["doc_id"]
     chunks = [c for c in prep_run.chunks if c["doc_id"] == doc_id]
@@ -105,6 +104,5 @@ def test_procedure_spanning_pages_stays_in_one_chunk(prep_run):
     assert "Paso 3" in paso_1["text"]
 
 
-@pytest.mark.known_bug("a single long paragraph exceeds max_tokens")
 def test_chunks_respect_max_tokens(prep_run):
     assert max(c["token_estimate"] for c in prep_run.chunks) <= 800
