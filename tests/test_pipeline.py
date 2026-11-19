@@ -14,7 +14,7 @@ def test_cleanup_drops_junk_and_exact_duplicates(prep_run):
     cleanup = prep_run.cleanup_report
     assert cleanup["drops"]["junk_count"] == 1
     assert cleanup["dedupe"]["duplicate_extra_copies"] == 1
-    assert cleanup["totals"]["copied_files"] == 6
+    assert cleanup["totals"]["copied_files"] == 7
 
 
 def test_inventory_has_one_row_per_clean_file(prep_run):
@@ -22,12 +22,13 @@ def test_inventory_has_one_row_per_clean_file(prep_run):
     assert filenames == [
         "apunte_diagnostico.docx",
         "apunte_legacy.doc",
+        "archivo_danado.pdf",
         "escaneo_clase.pdf",
         "guia_endodoncia_-_medicacion.pdf",
         "guia_endodoncia_medicacion_copia.pdf",
         "obturacion_larga.pdf",
     ]
-    assert len({r["doc_id"] for r in prep_run.inventory}) == 6
+    assert len({r["doc_id"] for r in prep_run.inventory}) == 7
 
 
 def test_pdf_page_counts(prep_run):
@@ -61,25 +62,33 @@ def test_only_ready_documents_are_chunked(prep_run):
     assert {c["doc_id"] for c in prep_run.chunks} <= ready
 
 
-@pytest.mark.known_bug("ingestion failure leaves the document status=ready and exit code 0")
-def test_failed_ingestion_is_not_left_ready(prep_run):
+def test_failed_ingestion_is_sent_to_review(prep_run):
     failed = {f["doc_id"] for f in prep_run.report("ingestion")["failures"]}
-    assert failed, "fixture should include a document that fails ingestion"
+    corrupt = prep_run.row_for("archivo_danado")
+    assert corrupt["doc_id"] in failed
     for row in prep_run.inventory:
         if row["doc_id"] in failed:
-            assert row["status"] != "ready"
+            assert (row["status"], row["ocr_quality"]) == ("needs_review", "failed")
+    assert not failed & {c["doc_id"] for c in prep_run.chunks}
 
 
-@pytest.mark.known_bug("legacy .doc is parsed as a .docx zip and fails")
-def test_legacy_doc_is_ingested_or_explicitly_unsupported(prep_run):
-    failures = prep_run.report("ingestion")["failures"]
-    assert not any("Unable to read DOCX" in f["error"] for f in failures)
+def test_legacy_doc_is_converted_or_fails_with_clear_message(prep_run):
+    row = prep_run.row_for("apunte_legacy")
+    failures = {f["doc_id"]: f["error"] for f in prep_run.report("ingestion")["failures"]}
+    if row["doc_id"] in failures:
+        # No converter on this machine (e.g. Linux CI without LibreOffice).
+        assert "Legacy Word file needs conversion" in failures[row["doc_id"]]
+        assert row["status"] == "needs_review"
+    else:
+        doc = prep_run.normalized(row["doc_id"])
+        assert doc["extraction_method"].startswith("docx-xml_after_")
 
 
-@pytest.mark.known_bug("empty-text PDF counts as ingested OK, so the OCR fallback never runs")
-def test_pdf_without_text_triggers_fallback(prep_run):
+def test_pdf_without_text_layer_goes_through_ocr_fallback(prep_run):
     doc = prep_run.normalized(prep_run.row_for("escaneo_clase")["doc_id"])
-    assert doc["extraction_trace"] != ["pypdf:ok"]
+    trace = doc["extraction_trace"]
+    assert trace[0] == "pypdf:low_text:coverage=0.00"
+    assert any(step.startswith("ocr_ocrmypdf:") for step in trace)
 
 
 @pytest.mark.known_bug("near-duplicate 'copia' resave is not detected")

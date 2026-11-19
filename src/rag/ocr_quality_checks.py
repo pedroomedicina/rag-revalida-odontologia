@@ -207,6 +207,13 @@ def run_moment2(rows: list[dict[str, str]], text_dir: Path) -> dict[str, object]
         if artifact is None:
             row["ocr_m2_notes"] = "text artifact not found"
             summary["issues"].append(f"{doc_id}: text artifact not found")
+            # A document that was meant to be ingested but produced no text cannot be
+            # chunked or cited; send it to review instead of leaving it "ready".
+            # Rows already excluded or under review keep their status.
+            if (row.get("status") or "").strip() == "ready":
+                row["ocr_quality"] = "failed"
+                row["status"] = "needs_review"
+                label_counter["failed"] = label_counter.get("failed", 0) + 1
             continue
 
         text = read_artifact_text(artifact)

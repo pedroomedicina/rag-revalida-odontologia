@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +14,7 @@ from rag.corpus_cleanup import normalized_title_key, safe_normalized_filename
 from rag.generate_inventory_csv import build_doc_id, slugify
 from rag.ocr_quality_checks import score_text_quality
 from rag.validate_inventory import validate_row
+from tests.fixtures.corpus_builder import write_docx
 
 TEMPLATE = {
     "required_non_empty": ["doc_id", "title"],
@@ -40,14 +45,51 @@ def test_slugify_is_ascii():
 
 
 def test_doc_id_shape():
-    assert build_doc_id("UCH", 7, "Guía Larga") == "UCH-0007-guia-larga"
+    assert re.fullmatch(r"UCH-guia-larga-[0-9a-f]{6}", build_doc_id("UCH", "Guía Larga.pdf"))
 
 
-@pytest.mark.known_bug(
-    "doc_id embeds the file's sorted position, so adding a file renumbers others"
-)
-def test_doc_id_does_not_depend_on_position():
-    assert build_doc_id("UCH", 1, "guia") == build_doc_id("UCH", 2, "guia")
+def test_doc_id_is_deterministic():
+    assert build_doc_id("UCH", "guia.pdf") == build_doc_id("UCH", "guia.pdf")
+
+
+def test_doc_id_distinguishes_same_name_in_different_folders():
+    assert build_doc_id("UCH", "a/guia.pdf") != build_doc_id("UCH", "b/guia.pdf")
+
+
+def test_doc_id_distinguishes_slugs_that_truncate_alike():
+    long_a = "x" * 60 + "_parte_a.pdf"
+    long_b = "x" * 60 + "_parte_b.pdf"
+    assert build_doc_id("UCH", long_a) != build_doc_id("UCH", long_b)
+
+
+def test_adding_a_file_keeps_existing_doc_ids(tmp_path):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    for name in ("guia.docx", "obturacion.docx"):
+        write_docx(corpus / name, ["texto"])
+
+    def inventory_ids() -> dict[str, str]:
+        out = tmp_path / "inventory.csv"
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "rag.generate_inventory_csv",
+                str(corpus),
+                "--output-csv",
+                str(out),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        with out.open(encoding="utf-8", newline="") as handle:
+            return {row["filename"]: row["doc_id"] for row in csv.DictReader(handle)}
+
+    before = inventory_ids()
+    write_docx(corpus / "acceso_cameral.docx", ["texto"])  # sorts first
+    after = inventory_ids()
+    assert len(after) == 3
+    assert {name: after[name] for name in before} == before
 
 
 def test_ocr_score_empty_text_fails():

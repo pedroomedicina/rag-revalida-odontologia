@@ -154,12 +154,13 @@ def write_docx(path: Path, paragraphs: list[str]) -> None:
 def build_sample_corpus(root: Path) -> Path:
     """Create the sample corpus under root/corpus and return that directory.
 
-    Contents (8 files, one junk):
+    Contents (9 files, one junk):
     - a 3-page guide whose final irrigation protocol spans pp. 2-3
     - a byte-identical copy of it in a subfolder (exact dedupe)
     - a "copia" resave with one sentence changed (near-duplicate)
     - a 1-page document with one paragraph longer than the 800-token chunk max
     - a .docx, a legacy .doc, a PDF without a text layer, and .DS_Store
+    - a corrupt .pdf that no extractor or repair can read (fails ingestion everywhere)
     """
     corpus = root / "corpus"
     if corpus.exists():
@@ -178,5 +179,6 @@ def build_sample_corpus(root: Path) -> Path:
     write_docx(corpus / "Apunte Diagnóstico.docx", DIAGNOSIS_PARAGRAPHS)
     (corpus / "Apunte_Legacy.doc").write_bytes(OLE2_HEADER)
     write_pdf(corpus / "Escaneo_Clase.pdf", [[""]], text_layer=False)
+    (corpus / "Archivo_Danado.pdf").write_bytes(b"this is not a PDF file\n" * 20)
     (corpus / ".DS_Store").write_bytes(b"")
     return corpus
