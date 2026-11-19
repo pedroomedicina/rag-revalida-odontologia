@@ -145,59 +145,142 @@ def ocr_pdf_with_ocrmypdf(input_pdf: Path, output_pdf: Path) -> bool:
     return result.returncode == 0 and output_pdf.exists()
 
 
+# Share of pages that must have extractable text before a PDF counts as having a text layer.
+# Below this (scans, image-only slides) the OCR fallback is attempted.
+MIN_TEXT_COVERAGE = 0.8
+
+
+def text_coverage(pages: list[dict[str, object]]) -> float:
+    if not pages:
+        return 0.0
+    return sum(1 for page in pages if str(page.get("text", "")).strip()) / len(pages)
+
+
 def extract_pdf_with_fallback(path: Path) -> tuple[list[dict[str, object]], str, list[str]]:
+    """Extract page text, repairing unreadable PDFs and OCR-ing PDFs without a text layer.
+
+    Order: pypdf -> (if unreadable) pikepdf repair -> qpdf repair -> (if unreadable or
+    low text coverage) ocrmypdf. A readable PDF whose text stays below MIN_TEXT_COVERAGE
+    after every available step is returned as `<method>_low_text`, so moment-2 OCR checks
+    can label it and send it to review instead of it silently passing as "ok".
+    """
     attempts: list[str] = []
+    pages: list[dict[str, object]] | None = None
+    extractor = ""
+
+    def accept(candidate: list[dict[str, object]], method: str, label: str) -> bool:
+        """Keep the candidate if it beats the current one; True when good enough to stop."""
+        nonlocal pages, extractor
+        coverage = text_coverage(candidate)
+        if pages is None or coverage > text_coverage(pages):
+            pages, extractor = candidate, method
+        if coverage >= MIN_TEXT_COVERAGE:
+            attempts.append(f"{label}:ok")
+            return True
+        attempts.append(f"{label}:low_text:coverage={coverage:.2f}")
+        return False
 
     try:
-        pages = extract_pdf_pages_pypdf(path)
-        attempts.append("pypdf:ok")
-        return pages, "pypdf", attempts
+        if accept(extract_pdf_pages_pypdf(path), "pypdf", "pypdf"):
+            return pages, extractor, attempts
     except Exception as exc:
         attempts.append(f"pypdf:fail:{exc}")
 
     with tempfile.TemporaryDirectory(prefix="ingest_pdf_") as tmpdir:
         tmp = Path(tmpdir)
-        repaired_pikepdf = tmp / f"{path.stem}.pikepdf.repaired.pdf"
-        repaired_qpdf = tmp / f"{path.stem}.qpdf.repaired.pdf"
+
+        # Repairs only help when pypdf could not parse the file at all.
+        if pages is None:
+            repairs = (
+                ("pikepdf", repair_pdf_with_pikepdf, "pypdf_after_pikepdf_repair"),
+                ("qpdf", repair_pdf_with_qpdf, "pypdf_after_qpdf_repair"),
+            )
+            for name, repair, method in repairs:
+                repaired = tmp / f"{path.stem}.{name}.repaired.pdf"
+                if not repair(path, repaired):
+                    attempts.append(f"repair_{name}:unavailable_or_failed")
+                    continue
+                attempts.append(f"repair_{name}:ok")
+                try:
+                    if accept(extract_pdf_pages_pypdf(repaired), method, f"pypdf_on_{name}"):
+                        return pages, extractor, attempts
+                    break  # readable now, but no text layer: go to OCR
+                except Exception as exc:
+                    attempts.append(f"pypdf_on_{name}:fail:{exc}")
+
         ocr_pdf = tmp / f"{path.stem}.ocr.pdf"
-
-        if repair_pdf_with_pikepdf(path, repaired_pikepdf):
-            try:
-                pages = extract_pdf_pages_pypdf(repaired_pikepdf)
-                attempts.append("repair_pikepdf:ok")
-                attempts.append("pypdf_on_pikepdf:ok")
-                return pages, "pypdf_after_pikepdf_repair", attempts
-            except Exception as exc:
-                attempts.append("repair_pikepdf:ok")
-                attempts.append(f"pypdf_on_pikepdf:fail:{exc}")
-        else:
-            attempts.append("repair_pikepdf:unavailable_or_failed")
-
-        if repair_pdf_with_qpdf(path, repaired_qpdf):
-            try:
-                pages = extract_pdf_pages_pypdf(repaired_qpdf)
-                attempts.append("repair_qpdf:ok")
-                attempts.append("pypdf_on_qpdf:ok")
-                return pages, "pypdf_after_qpdf_repair", attempts
-            except Exception as exc:
-                attempts.append("repair_qpdf:ok")
-                attempts.append(f"pypdf_on_qpdf:fail:{exc}")
-        else:
-            attempts.append("repair_qpdf:unavailable_or_failed")
-
         if ocr_pdf_with_ocrmypdf(path, ocr_pdf):
+            attempts.append("ocr_ocrmypdf:ok")
             try:
-                pages = extract_pdf_pages_pypdf(ocr_pdf)
-                attempts.append("ocr_ocrmypdf:ok")
-                attempts.append("pypdf_on_ocr_pdf:ok")
-                return pages, "ocrmypdf_then_pypdf", attempts
+                if accept(extract_pdf_pages_pypdf(ocr_pdf), "ocrmypdf_then_pypdf", "pypdf_on_ocr"):
+                    return pages, extractor, attempts
             except Exception as exc:
-                attempts.append("ocr_ocrmypdf:ok")
-                attempts.append(f"pypdf_on_ocr_pdf:fail:{exc}")
+                attempts.append(f"pypdf_on_ocr:fail:{exc}")
         else:
             attempts.append("ocr_ocrmypdf:unavailable_or_failed")
 
+    if pages is not None:
+        attempts.append("kept_low_text_extraction")
+        return pages, f"{extractor}_low_text", attempts
+
     raise RuntimeError("PDF extraction failed after fallback chain: " + " | ".join(attempts))
+
+
+LEGACY_WORD_EXTENSIONS = {"doc", "dot"}
+
+
+def convert_legacy_word(path: Path, out_dir: Path) -> tuple[Path, str]:
+    """Convert a binary .doc/.dot to .docx with LibreOffice, or macOS textutil as a fallback."""
+    tried: list[str] = []
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice:
+        result = subprocess.run(
+            [soffice, "--headless", "--convert-to", "docx", "--outdir", str(out_dir), str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        converted = out_dir / f"{path.stem}.docx"
+        if result.returncode == 0 and converted.exists():
+            return converted, "soffice"
+        tried.append(f"soffice:exit={result.returncode}")
+    else:
+        tried.append("soffice:not_installed")
+
+    textutil = shutil.which("textutil")
+    if textutil:
+        converted = out_dir / f"{path.stem}.textutil.docx"
+        result = subprocess.run(
+            [textutil, "-convert", "docx", str(path), "-output", str(converted)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if result.returncode == 0 and converted.exists():
+            return converted, "textutil"
+        tried.append(f"textutil:exit={result.returncode}")
+    else:
+        tried.append("textutil:not_installed")
+
+    raise RuntimeError(
+        f"Legacy Word file needs conversion to .docx and no converter succeeded "
+        f"({', '.join(tried)}). Install LibreOffice or convert the file to .docx: {path}"
+    )
+
+
+def extract_word_pages(path: Path) -> tuple[list[dict[str, object]], str, list[str]]:
+    ext = path.suffix.lower().lstrip(".")
+    if ext not in LEGACY_WORD_EXTENSIONS:
+        pages, extractor = extract_docx_pages(path)
+        return pages, extractor, [f"{extractor}:ok"]
+
+    with tempfile.TemporaryDirectory(prefix="ingest_doc_") as tmpdir:
+        converted, converter = convert_legacy_word(path, Path(tmpdir))
+        pages, extractor = extract_docx_pages(converted)
+    method = f"{extractor}_after_{converter}"
+    return pages, method, [f"convert_{converter}:ok", f"{extractor}:ok"]
 
 
 def extract_docx_pages(path: Path) -> tuple[list[dict[str, object]], str]:
@@ -248,8 +331,7 @@ def ingest_document(row: dict[str, str]) -> dict[str, object]:
     if ext == "pdf":
         pages, extractor, method_trace = extract_pdf_with_fallback(source_path)
     elif ext in {"docx", "doc", "docm", "dot", "dotx"}:
-        pages, extractor = extract_docx_pages(source_path)
-        method_trace = [f"{extractor}:ok"]
+        pages, extractor, method_trace = extract_word_pages(source_path)
     else:
         raise RuntimeError(f"{doc_id}: unsupported extension '{ext}'")
 
