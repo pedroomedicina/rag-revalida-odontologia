@@ -1346,6 +1346,7 @@ rag = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "psycopg", extra = ["binary"] },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -1364,6 +1365,7 @@ provides-extras = ["rag"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pytest", specifier = ">=8.4" },
     { name = "ruff", specifier = ">=0.13" },
 ]

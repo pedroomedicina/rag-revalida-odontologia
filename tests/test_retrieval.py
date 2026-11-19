@@ -20,7 +20,7 @@ def hit(chunk_id: str, **extra) -> dict[str, object]:
 
 
 def test_normalize_query():
-    assert normalize_query("  ¿Qué   es  el EDTA? ") == "¿qué es el edta?"
+    assert normalize_query("  ¿Qué   es  el EDTA? ¡Ya! ") == "qué es el edta? ya!"
 
 
 def test_hybrid_fuse_rewards_agreement():
