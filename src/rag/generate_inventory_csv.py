@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import re
 import unicodedata
 from collections.abc import Iterable
@@ -52,8 +53,22 @@ def pdf_page_count(path: Path) -> str:
         return str(count) if count > 0 else ""
 
 
-def build_doc_id(prefix: str, index: int, filename: str) -> str:
-    return f"{prefix}-{index:04d}-{slugify(filename)[:32]}"
+DOC_ID_SLUG_MAX = 40
+DOC_ID_HASH_LEN = 6
+
+
+def build_doc_id(prefix: str, relative_path: str) -> str:
+    """Return an ID that depends only on the file's path within the corpus.
+
+    Adding, removing, or renaming other files never changes it. The slug keeps it readable
+    in citations; the short hash of the full relative path keeps it unique when two slugs
+    truncate to the same text or the same filename appears in different subfolders.
+    """
+    key = relative_path.replace("\\", "/").lower()
+    stem = Path(key).stem
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:DOC_ID_HASH_LEN]
+    slug = slugify(stem)[:DOC_ID_SLUG_MAX].strip("-") or "document"
+    return f"{prefix}-{slug}-{digest}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -131,7 +146,15 @@ def main() -> int:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
 
-        for idx, path in enumerate(files, start=1):
+        seen_ids: dict[str, Path] = {}
+        for path in files:
+            doc_id = build_doc_id(args.doc_id_prefix, path.relative_to(source).as_posix())
+            if doc_id in seen_ids:
+                raise SystemExit(
+                    f"doc_id collision: {seen_ids[doc_id]} and {path} both map to {doc_id}"
+                )
+            seen_ids[doc_id] = path
+
             ext = path.suffix.lower().lstrip(".")
             page_count = ""
             if ext == "pdf":
@@ -139,7 +162,7 @@ def main() -> int:
 
             writer.writerow(
                 {
-                    "doc_id": build_doc_id(args.doc_id_prefix, idx, path.stem),
+                    "doc_id": doc_id,
                     "filename": path.name,
                     "source_path": str(path),
                     "title": title_from_filename(path),
