@@ -10,6 +10,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from rag.text_search import KEYWORD_TSQUERY_SQL
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -60,7 +62,8 @@ def validate_table_name(table: str) -> str:
 
 
 def normalize_query(text: str) -> str:
-    return " ".join(text.strip().lower().split())
+    """Lowercase, drop Spanish opening marks (¿ ¡ stick to the next word), collapse spaces."""
+    return " ".join(re.sub(r"[¿¡]", " ", text).lower().split())
 
 
 def to_vector_literal(values: Sequence[float]) -> str:
@@ -88,18 +91,23 @@ def fetch_vector_hits(
 
 
 def fetch_keyword_hits(cursor, table: str, query: str, limit: int) -> list[dict[str, object]]:
+    """Full-text hits for any of the question's words, best-ranked first.
+
+    See rag.text_search for why this ORs lexemes instead of using plainto_tsquery.
+    """
     cursor.execute(
         f"""
+        WITH q AS (SELECT {KEYWORD_TSQUERY_SQL} AS query)
         SELECT
-            chunk_id, doc_id, title, filename, page_start, page_end,
-            section_title, content_type, ocr_quality, text,
-            ts_rank_cd(search_tsv, plainto_tsquery('spanish', %s)) AS keyword_score
-        FROM {table}
-        WHERE search_tsv @@ plainto_tsquery('spanish', %s)
-        ORDER BY keyword_score DESC
+            t.chunk_id, t.doc_id, t.title, t.filename, t.page_start, t.page_end,
+            t.section_title, t.content_type, t.ocr_quality, t.text,
+            ts_rank_cd(t.search_tsv, q.query) AS keyword_score
+        FROM {table} AS t, q
+        WHERE t.search_tsv @@ q.query
+        ORDER BY keyword_score DESC, t.chunk_id
         LIMIT %s;
         """,
-        (query, query, limit),
+        (query, limit),
     )
     rows = cursor.fetchall()
     columns = [column.name for column in cursor.description]

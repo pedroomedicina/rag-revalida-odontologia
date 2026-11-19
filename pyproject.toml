@@ -21,6 +21,8 @@ rag = [
 
 [dependency-groups]
 dev = [
+    # psycopg for the Postgres integration tests (tests/integration).
+    "psycopg[binary]>=3.2",
     "pytest>=8.4",
     "ruff>=0.13",
 ]
@@ -36,6 +38,7 @@ packages = ["src/rag"]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
+    "integration: needs Postgres at RAG_TEST_DSN (skipped when unset)",
     "known_bug: documents a confirmed defect from docs/status_2026-11-19.md; expected to fail until fixed",
 ]
 

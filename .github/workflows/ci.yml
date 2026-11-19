@@ -13,6 +13,24 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      # Postgres with pgvector (unaccent ships with the official image's contrib) for
+      # tests/integration. Throwaway credentials, only reachable from this job.
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rag_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      RAG_TEST_DSN: postgresql://postgres:postgres@localhost:5432/rag_test
     steps:
       - uses: actions/checkout@v4
 
@@ -20,8 +38,8 @@ jobs:
         with:
           enable-cache: true
 
-      # Base deps + dev group only. The `rag` extra (torch, sentence-transformers,
-      # psycopg, openai) is not needed for prep or unit tests.
+      # Base deps + dev group (includes psycopg). The `rag` extra (torch,
+      # sentence-transformers, openai) is not needed for any test.
       - name: Install
         run: uv sync --locked
 
@@ -31,5 +49,10 @@ jobs:
       - name: Format
         run: uv run ruff format --check src scripts tests
 
+      # Runs unit and integration tests; fails if any integration test is skipped,
+      # so a broken service container can't pass silently.
       - name: Test
-        run: uv run pytest
+        run: |
+          set -o pipefail
+          uv run pytest -rs | tee pytest.log
+          if grep -q "^SKIPPED" pytest.log; then echo "::error::tests were skipped in CI"; exit 1; fi

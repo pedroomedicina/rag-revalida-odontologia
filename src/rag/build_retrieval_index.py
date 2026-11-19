@@ -11,6 +11,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from rag.text_search import TS_CONFIG, ensure_search_column, ensure_text_search_config
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -112,6 +114,7 @@ def to_vector_literal(values: Sequence[float]) -> str:
 
 def ensure_schema(cursor, table: str, embedding_dim: int) -> None:
     cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+    ensure_text_search_config(cursor)
     cursor.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {table} (
@@ -127,23 +130,16 @@ def ensure_schema(cursor, table: str, embedding_dim: int) -> None:
             extraction_method TEXT NOT NULL,
             token_estimate INTEGER NOT NULL,
             text TEXT NOT NULL,
-            embedding VECTOR({embedding_dim}) NOT NULL,
-            search_tsv tsvector GENERATED ALWAYS AS (
-                to_tsvector(
-                    'spanish',
-                    coalesce(title, '') || ' ' ||
-                    coalesce(section_title, '') || ' ' ||
-                    coalesce(text, '')
-                )
-            ) STORED
+            embedding VECTOR({embedding_dim}) NOT NULL
         );
         """
     )
+    # Adds search_tsv on new tables and migrates tables built with the old `spanish` config.
+    if ensure_search_column(cursor, table):
+        print(f"search_tsv (re)built with the {TS_CONFIG} text search config")
     cursor.execute(
-        f"CREATE INDEX IF NOT EXISTS {table}_embedding_ivfflat_idx ON {table} USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);"
-    )
-    cursor.execute(
-        f"CREATE INDEX IF NOT EXISTS {table}_search_tsv_gin_idx ON {table} USING gin (search_tsv);"
+        f"CREATE INDEX IF NOT EXISTS {table}_embedding_ivfflat_idx ON {table} "
+        "USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);"
     )
     cursor.execute(f"CREATE INDEX IF NOT EXISTS {table}_doc_id_idx ON {table} (doc_id);")
 
