@@ -2,7 +2,7 @@
 
 MVP RAG pipeline for Spanish endodontics study material. The project prepares a corpus, validates metadata, creates chunked artifacts, and supports hybrid retrieval plus answer generation.
 
-Current state and known defects: [docs/status_2026-11-19.md](docs/status_2026-11-19.md).
+Plan, design, and decisions: [docs/README.md](docs/README.md). Work items: GitHub Issues and the project board. Dated audit: [docs/status_2026-11-19.md](docs/status_2026-11-19.md).
 
 ## Project layout
 
