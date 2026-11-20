@@ -3,6 +3,7 @@ name = "rag-revalida-odontologia"
 version = "0.1.0"
 description = "Grounded Spanish RAG pipeline for endodontics study material."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "pypdf>=6.9",
