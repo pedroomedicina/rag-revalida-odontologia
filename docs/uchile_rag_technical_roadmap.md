@@ -7,27 +7,33 @@ Build a Spanish-only chatbot for exam/revalidation prep that answers **only** fr
 
 ## Current implementation snapshot (this repository)
 
-### Already implemented
-- corpus cleanup script with dedupe/filtering/normalization: `scripts/corpus_cleanup.py`
-- inventory generator: `scripts/generate_inventory_csv.py`
-- metadata template and constraints: `configs/metadata_template.json`
-- inventory validator with schema/value checks: `scripts/validate_inventory.py`
-- split OCR quality checks (moment 1 + moment 2): `scripts/ocr_quality_checks.py`
-- ingestion with fallback chain (`pypdf` -> repair -> OCR when tools are available): `scripts/ingest.py`
-- orchestration script for prep order: `scripts/run_mvp_prep.py`
+Pipeline code lives in `src/rag/`; `scripts/` holds thin CLI wrappers. Known defects are tracked in `docs/status_2026-11-19.md`.
 
-### Current outputs already available
-- `corpus_inventory.csv`
-- `normalized_docs/*.json`
-- `ingestion_report_retry_final2.json` (latest ingestion run)
-- `inventory_validation_report.json`
-- `inventory_ocr_m1_report.json`
-- `inventory_ocr_m2_report.json`
+### Already implemented
+- corpus cleanup with dedupe/filtering/normalization: `src/rag/corpus_cleanup.py`
+- inventory generator: `src/rag/generate_inventory_csv.py`
+- metadata template and constraints: `configs/metadata_template.json`
+- inventory validator with schema/value checks: `src/rag/validate_inventory.py`
+- split OCR quality checks (moment 1 + moment 2): `src/rag/ocr_quality_checks.py`
+- ingestion with fallback chain (`pypdf` -> repair -> OCR); text-less PDFs are routed to OCR and failed documents go to review: `src/rag/ingest.py`
+- stable `doc_id`s derived from the path within the corpus
+- chunking with paragraph detection, a hard max size, page-spanning procedures, and mid-page headings: `src/rag/chunker.py` (spec: `docs/chunking_spec.md`)
+- Postgres hybrid index (pgvector embeddings + accent-insensitive full-text search): `src/rag/build_retrieval_index.py`, `src/rag/text_search.py`
+- hybrid retrieval with reciprocal rank fusion and cross-encoder reranking: `src/rag/retrieve_hybrid.py`
+- grounded answer generation with citation checks: `src/rag/answer_with_rag.py`
+- orchestration script for prep order: `src/rag/run_mvp_prep.py`
+- uv packaging (Python 3.12), pytest suite on a synthetic corpus, Postgres integration tests, and CI
+
+### Pipeline outputs (generated, not tracked)
+- `data/processed/corpus_inventory.csv`
+- `data/normalized/*.json`
+- `data/processed/chunks.jsonl`
+- `artifacts/reports/*.json`
 
 ### Current state
-- corpus operations foundation is in place
-- ingestion artifacts are up to date for the current MVP corpus
-- next active implementation focus is chunking (`chunker.py`) and chunk-level metadata
+- prep pipeline, chunking, indexing, retrieval, and answering are implemented end to end
+- open defects: index never deletes stale rows on re-chunk, near-duplicate resave detection, OCR quality scoring, and citation validator gaps
+- next active focus: fix the open defects, then build a gold evaluation set and a retrieval recall baseline
 
 ---
 
@@ -600,11 +606,12 @@ Build:
 - validator passes on required metadata structure
 - moment-1 OCR report generated
 
-### Current checkpoint (Mar 2026)
-- done: cleanup + inventory + validation + OCR moment 1
-- done: ingestion + OCR moment 2 for current corpus
-- done: normalized artifacts generated and validated
-- next: implement chunking outputs (`chunks.jsonl` / `chunks.parquet`)
+### Current checkpoint (Nov 2026)
+- done: cleanup + inventory + validation + OCR moment 1 and moment 2
+- done: ingestion with OCR routing for text-less PDFs, stable `doc_id`s
+- done: chunking (`chunks.jsonl`), hybrid index, hybrid retrieval + rerank, answer generation with citations
+- done: test suite, Postgres integration tests, CI
+- next: delete-by-doc before upsert, citation validator fixes, gold evaluation set, recall baseline
 
 ### Phase 1 — Proof of concept
 **Goal:** prove answer quality on a small corpus
