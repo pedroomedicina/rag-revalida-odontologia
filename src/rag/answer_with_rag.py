@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -229,30 +230,89 @@ def generate_answer_openai(
         ) from exc
 
 
-def validate_citations(
-    payload: dict[str, object], evidence_items: Sequence[EvidenceItem]
-) -> list[str]:
-    allowed_by_id = {item.evidence_id: item.citation for item in evidence_items}
-    errors: list[str] = []
+SUFFICIENCY_VALUES = ("suficiente", "insuficiente")
 
-    fuentes = payload.get("fuentes", [])
-    if not isinstance(fuentes, list):
-        return ["Field 'fuentes' must be a list."]
+# A bracketed page reference written in the answer text: "[DOC p.3]", "[DOC pp.3-5]",
+# and loose variants such as "[DOC, p. 3]".
+INLINE_CITATION_RE = re.compile(r"\[[^\[\]]*?\bpp?\.\s*\d+(?:\s*[-–]\s*\d+)?\s*\]")
 
-    for idx, source in enumerate(fuentes, start=1):
-        if not isinstance(source, dict):
-            errors.append(f"fuentes[{idx}] must be an object.")
+
+def _citation_key(citation: str) -> str:
+    """Compare citations ignoring spaces, commas, and dash style."""
+    return re.sub(r"[\s,]", "", citation).replace("–", "-")
+
+
+def _check_cited_items(
+    field: str,
+    items: object,
+    allowed_by_id: dict[str, str],
+    errors: list[str],
+) -> int:
+    """Validate a list of {evidence_id, citation} objects; return how many were valid."""
+    if items is None:
+        return 0
+    if not isinstance(items, list):
+        errors.append(f"Field '{field}' must be a list.")
+        return 0
+    valid = 0
+    for idx, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            errors.append(f"{field}[{idx}] must be an object.")
             continue
-        evidence_id = str(source.get("evidence_id", "")).strip()
-        citation = str(source.get("citation", "")).strip()
+        evidence_id = str(item.get("evidence_id", "")).strip()
+        citation = str(item.get("citation", "")).strip()
         expected = allowed_by_id.get(evidence_id)
-        if not evidence_id or evidence_id not in allowed_by_id:
-            errors.append(f"fuentes[{idx}] uses unknown evidence_id '{evidence_id}'.")
+        if expected is None:
+            errors.append(f"{field}[{idx}] uses unknown evidence_id '{evidence_id}'.")
             continue
         if citation != expected:
             errors.append(
-                f"fuentes[{idx}] citation mismatch for {evidence_id}: got '{citation}' expected '{expected}'."
+                f"{field}[{idx}] citation mismatch for {evidence_id}: "
+                f"got '{citation}' expected '{expected}'."
             )
+            continue
+        valid += 1
+    return valid
+
+
+def validate_citations(
+    payload: dict[str, object], evidence_items: Sequence[EvidenceItem]
+) -> list[str]:
+    """Check that every citation in the model's answer points at retrieved evidence.
+
+    - `suficiencia_evidencia` is "suficiente" or "insuficiente"; a "suficiente" answer
+      must cite at least one valid source.
+    - Every entry in `fuentes` and `fragmentos_de_apoyo` names a retrieved evidence_id and
+      repeats that chunk's citation exactly.
+    - Every bracketed page citation written inside `respuesta` is one of the retrieved
+      chunks' citations.
+
+    Returns a list of errors; empty means valid. Paraphrased fragments are allowed, so
+    fragment text is not compared with the chunk text.
+    """
+    allowed_by_id = {item.evidence_id: item.citation for item in evidence_items}
+    errors: list[str] = []
+
+    sufficiency = str(payload.get("suficiencia_evidencia", "")).strip()
+    if sufficiency not in SUFFICIENCY_VALUES:
+        errors.append(
+            f"Field 'suficiencia_evidencia' must be one of {SUFFICIENCY_VALUES}, "
+            f"got '{sufficiency}'."
+        )
+
+    valid_sources = _check_cited_items("fuentes", payload.get("fuentes", []), allowed_by_id, errors)
+    _check_cited_items(
+        "fragmentos_de_apoyo", payload.get("fragmentos_de_apoyo"), allowed_by_id, errors
+    )
+
+    if sufficiency == "suficiente" and valid_sources == 0:
+        errors.append("A 'suficiente' answer must cite at least one retrieved source in 'fuentes'.")
+
+    allowed_keys = {_citation_key(citation) for citation in allowed_by_id.values()}
+    respuesta = str(payload.get("respuesta", ""))
+    for inline in INLINE_CITATION_RE.findall(respuesta):
+        if _citation_key(inline) not in allowed_keys:
+            errors.append(f"'respuesta' cites {inline}, which is not a retrieved chunk.")
     return errors
 
 
