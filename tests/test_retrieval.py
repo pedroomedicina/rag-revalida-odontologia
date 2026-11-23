@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from rag.retrieval_smoke_test import build_parser as smoke_parser
+from rag.retrieval_smoke_test import parse_cli as parse_smoke_cli
 from rag.retrieve_hybrid import (
     apply_quality_prior,
     build_generator_payload,
@@ -69,10 +69,12 @@ def test_table_name_rejects_injection():
         validate_table_name("rag_chunks; DROP TABLE x")
 
 
-@pytest.mark.known_bug("--dsn is rejected unless passed after a '--' separator")
-def test_smoke_test_accepts_dsn_flag():
-    try:
-        args = smoke_parser().parse_args(["--dsn", "postgresql://x"])
-    except SystemExit:
-        pytest.fail("argparse rejected --dsn")
-    assert "postgresql://x" in args.extra_args
+def test_smoke_test_forwards_unknown_flags():
+    args = parse_smoke_cli(["--min-results", "2", "--dsn", "postgresql://x", "--table", "t"])
+    assert args.min_results == 2
+    assert args.extra_args == ["--dsn", "postgresql://x", "--table", "t"]
+
+
+def test_smoke_test_still_accepts_double_dash_form():
+    args = parse_smoke_cli(["--", "--dsn", "postgresql://x"])
+    assert args.extra_args == ["--dsn", "postgresql://x"]

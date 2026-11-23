@@ -42,10 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help="Final result count sent to retrieve script",
     )
-    parser.add_argument(
-        "extra_args",
-        nargs="*",
-        help="Extra args passed to retrieve_hybrid.py (e.g. --dsn ... --table ...)",
+    parser.epilog = (
+        "Any other flags (e.g. --dsn ... --table ...) are passed through to retrieve_hybrid.py."
     )
     return parser
 
@@ -97,8 +95,20 @@ def run_query(
     return True
 
 
+def parse_cli(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse own flags; every unrecognized flag (e.g. --dsn, --table) goes to retrieve_hybrid.
+
+    Both `--dsn X` and the older `-- --dsn X` form work.
+    """
+    args, unknown = build_parser().parse_known_args(argv)
+    if unknown[:1] == ["--"]:
+        unknown = unknown[1:]
+    args.extra_args = unknown
+    return args
+
+
 def main() -> int:
-    args = build_parser().parse_args()
+    args = parse_cli()
     retrieve_script = args.retrieve_script.expanduser().resolve()
     if not retrieve_script.exists():
         raise SystemExit(f"retrieve script not found: {retrieve_script}")
