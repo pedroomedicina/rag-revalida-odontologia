@@ -10,9 +10,6 @@ of them against a pgvector service container.
 
 from __future__ import annotations
 
-import os
-import uuid
-
 import pytest
 
 from rag.build_retrieval_index import ChunkRecord, ensure_schema, upsert_batch
@@ -21,13 +18,10 @@ from rag.text_search import (
     SEARCH_TSV_EXPRESSION,
     TS_CONFIG,
     ensure_search_column,
-    ensure_text_search_config,
     search_tsv_expression_of,
 )
 
 pytestmark = pytest.mark.integration
-
-psycopg = pytest.importorskip("psycopg")
 
 CHUNKS = {
     "calcio": (
@@ -45,26 +39,6 @@ CHUNKS = {
         "La obturación busca un sellado tridimensional que impida la recontaminación.",
     ),
 }
-
-
-@pytest.fixture(scope="module")
-def conn():
-    dsn = os.environ.get("RAG_TEST_DSN")
-    if not dsn:
-        pytest.skip("RAG_TEST_DSN not set")
-    try:
-        connection = psycopg.connect(dsn, autocommit=True)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"cannot connect to RAG_TEST_DSN: {exc}")
-    schema = f"rag_test_{uuid.uuid4().hex[:8]}"
-    with connection.cursor() as cur:
-        ensure_text_search_config(cur)  # database-level, idempotent
-        cur.execute(f"CREATE SCHEMA {schema}")
-        cur.execute(f"SET search_path TO {schema}, public")
-    yield connection
-    with connection.cursor() as cur:
-        cur.execute(f"DROP SCHEMA {schema} CASCADE")
-    connection.close()
 
 
 def create_keyword_table(cur, table: str, tsv_expression: str) -> None:
@@ -140,11 +114,8 @@ def test_old_spanish_column_is_migrated(conn):
 
 
 @pytest.fixture(scope="module")
-def full_table(conn):
+def full_table(conn, require_pgvector):
     with conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM pg_available_extensions WHERE name = 'vector'")
-        if cur.fetchone() is None:
-            pytest.skip("pgvector not installed on this Postgres")
         ensure_schema(cur, "rag_chunks_full", embedding_dim=3)
         records, vectors = [], []
         for index, (chunk_id, (section, text)) in enumerate(CHUNKS.items()):

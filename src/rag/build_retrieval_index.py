@@ -49,7 +49,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-chunks",
         type=int,
         default=0,
-        help="Optional cap for quick tests (0 = all chunks)",
+        help=(
+            "Optional cap for quick tests (0 = all chunks). Documents it touches are fully "
+            "replaced by the capped rows."
+        ),
+    )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="Also delete rows whose doc_id is not in the chunks file (documents removed "
+        "from the corpus). Not allowed with --max-chunks.",
     )
     return parser
 
@@ -190,6 +199,38 @@ def upsert_batch(
     cursor.executemany(sql, params)
 
 
+def replace_chunks(
+    cursor,
+    table: str,
+    records: Sequence[ChunkRecord],
+    vectors: Sequence[Sequence[float]],
+    prune: bool = False,
+) -> dict[str, int]:
+    """Make the table hold exactly these chunks for every document they belong to.
+
+    Chunk IDs are positional (`<doc_id>-ch-0001`), so re-chunking a document can leave
+    old IDs behind; upserting alone never removes them. All existing rows of each doc_id
+    in `records` are deleted first, then the new rows are inserted. With prune=True,
+    rows of documents absent from `records` are deleted too.
+
+    Run inside one transaction so readers never see a document half-replaced.
+    """
+    doc_ids = sorted({record.doc_id for record in records})
+    cursor.execute(f"DELETE FROM {table} WHERE doc_id = ANY(%s)", (doc_ids,))
+    replaced = cursor.rowcount
+    pruned = 0
+    if prune:
+        cursor.execute(f"DELETE FROM {table} WHERE NOT (doc_id = ANY(%s))", (doc_ids,))
+        pruned = cursor.rowcount
+    upsert_batch(cursor, table=table, records=records, vectors=vectors)
+    return {
+        "documents": len(doc_ids),
+        "deleted_rows": replaced,
+        "pruned_rows": pruned,
+        "inserted_rows": len(records),
+    }
+
+
 def main() -> int:
     load_dotenv()
     args = build_parser().parse_args()
@@ -202,6 +243,8 @@ def main() -> int:
         raise SystemExit("Missing --dsn and DATABASE_URL is not set.")
     if args.batch_size < 1:
         raise SystemExit("batch-size must be >= 1")
+    if args.prune and args.max_chunks > 0:
+        raise SystemExit("--prune with --max-chunks would delete documents past the cap.")
 
     records = load_chunks(chunks_path, max_chunks=max(args.max_chunks, 0))
     if not records:
@@ -223,27 +266,33 @@ def main() -> int:
     probe_vector = model.encode([records[0].text], normalize_embeddings=True)[0]
     embedding_dim = int(len(probe_vector))
 
+    total = len(records)
+    vectors_as_lists: list[list[float]] = []
+    for batch in batched(records, args.batch_size):
+        vectors = model.encode(
+            [record.text for record in batch],
+            batch_size=args.batch_size,
+            normalize_embeddings=True,
+        )
+        vectors_as_lists.extend(list(map(float, vector)) for vector in vectors)
+        print(f"Embedded {len(vectors_as_lists)}/{total} chunks")
+
     with psycopg.connect(args.dsn) as conn:
         with conn.cursor() as cursor:
             ensure_schema(cursor, table=table, embedding_dim=embedding_dim)
         conn.commit()
 
-        total = len(records)
-        upserted = 0
-        for batch in batched(records, args.batch_size):
-            texts = [record.text for record in batch]
-            vectors = model.encode(
-                texts,
-                batch_size=args.batch_size,
-                normalize_embeddings=True,
+        # Delete + insert in one transaction: no window where a document is missing.
+        with conn.cursor() as cursor:
+            counts = replace_chunks(
+                cursor, table=table, records=records, vectors=vectors_as_lists, prune=args.prune
             )
-            vectors_as_lists: list[list[float]] = [list(map(float, vector)) for vector in vectors]
-            with conn.cursor() as cursor:
-                upsert_batch(cursor, table=table, records=batch, vectors=vectors_as_lists)
-            conn.commit()
-            upserted += len(batch)
-            print(f"Upserted {upserted}/{total} chunks")
+        conn.commit()
 
+    print(
+        f"Replaced {counts['documents']} documents: deleted {counts['deleted_rows']} old rows, "
+        f"inserted {counts['inserted_rows']}, pruned {counts['pruned_rows']}."
+    )
     print("Done.")
     print(f"Table: {table}")
     print(f"Embedding model: {args.embedding_model}")
