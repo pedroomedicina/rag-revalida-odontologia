@@ -95,4 +95,4 @@ Tests marked `known_bug` describe correct behavior for a defect listed in the st
 ## Notes
 
 - Keep large corpus data and generated artifacts out of git.
-- Use `scripts/retrieval_smoke_test.py` for quick checks after retrieval changes. Pass retrieval flags after `--`, for example `-- --dsn "$DATABASE_URL"`.
+- Use `scripts/retrieval_smoke_test.py` for quick checks after retrieval changes. Unrecognized flags such as `--dsn "$DATABASE_URL"` are passed through to retrieval.
