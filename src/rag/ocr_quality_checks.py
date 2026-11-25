@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import re
+import unicodedata
 from pathlib import Path
 
 
@@ -60,52 +61,95 @@ def safe_ratio(numerator: int, denominator: int) -> float:
     return numerator / denominator
 
 
+MIN_TEXT_CHARS = 20  # letters/digits; below this there is not enough text to judge
+MIN_PAGE_COVERAGE = 0.8  # same threshold ingestion uses before trying OCR
+GOOD_SCORE = 0.75
+USABLE_SCORE = 0.45
+CAUTION_CAP = 0.74
+MAX_WORD_LENGTH = 25
+
+ODD_SYMBOL_RE = re.compile(r"[^\w\s.,;:¿?¡!\-()/%°•–—“”«»\"']")
+WORD_SPLIT_RE = re.compile(r"[\s\-/–—]+")
+NUMBER_RE = re.compile(r"\d+(?:[.,:]\d+)*")
+VOWEL_RE = re.compile(r"[aeiouyáéíóúü]", re.IGNORECASE)
+SINGLE_LETTER_WORDS = set("aeouyáéóú")
+
+
+def plausible_word_ratio(text: str) -> float:
+    """Share of words that look like words: only letters, with a vowel, not run together.
+
+    Plain numbers are neutral. Catches OCR noise such as "h1dr0x1d0" or "E l c a l c i o".
+    """
+    words = plausible = 0
+    for token in WORD_SPLIT_RE.split(text):
+        token = token.strip(".,;:¿?¡!()[]%°•“”«»\"'")
+        if not any(ch.isalnum() for ch in token) or NUMBER_RE.fullmatch(token):
+            continue
+        words += 1
+        if len(token) == 1:
+            plausible += token.lower() in SINGLE_LETTER_WORDS
+        elif token.isalpha() and len(token) <= MAX_WORD_LENGTH and VOWEL_RE.search(token):
+            plausible += 1
+    return safe_ratio(plausible, words)
+
+
+def label_for_score(score: float) -> str:
+    if score >= GOOD_SCORE:
+        return "good"
+    if score >= USABLE_SCORE:
+        return "usable_with_caution"
+    return "poor" if score > 0 else "failed"
+
+
 def score_text_quality(text: str) -> tuple[float, str]:
-    cleaned = text or ""
-    total = len(cleaned)
+    """Score one page on character and word signals. Length is only a floor."""
+    text = unicodedata.normalize("NFC", text or "")
+    visible = [ch for ch in text if not ch.isspace()]
+    total = len(visible)
     if total == 0:
         return 0.0, "failed"
 
-    printable = sum(1 for ch in cleaned if ch.isprintable())
-    alpha = sum(1 for ch in cleaned if ch.isalpha())
-    weird = len(re.findall(r"[^\w\s\.,;:¿\?¡!\-()/]", cleaned, flags=re.UNICODE))
-
-    printable_ratio = safe_ratio(printable, total)
-    alpha_ratio = safe_ratio(alpha, total)
-    weird_ratio = safe_ratio(weird, total)
+    printable_ratio = safe_ratio(sum(ch.isprintable() for ch in visible), total)
+    alpha_ratio = safe_ratio(sum(ch.isalpha() for ch in visible), total)
+    odd_ratio = safe_ratio(len(ODD_SYMBOL_RE.findall(text)), total)
 
     score = (
-        min(1.0, total / 4000.0) * 0.45
-        + printable_ratio * 0.25
-        + alpha_ratio * 0.2
-        + max(0.0, 1.0 - weird_ratio * 4.0) * 0.1
+        # Full marks from 95% plausible words, none at 50% or less.
+        max(0.0, min(1.0, (plausible_word_ratio(text) - 0.5) / 0.45)) * 0.6
+        + min(1.0, alpha_ratio / 0.7) * 0.2
+        + printable_ratio * 0.1
+        + max(0.0, 1.0 - odd_ratio * 4.0) * 0.1
     )
-    score = max(0.0, min(1.0, score))
-
-    if score >= 0.75:
-        label = "good"
-    elif score >= 0.45:
-        label = "usable_with_caution"
-    elif score > 0:
-        label = "poor"
-    else:
-        label = "failed"
-    return score, label
+    return score, label_for_score(score)
 
 
-def extract_pdf_text_sample(path: Path, max_pages: int = 3) -> str:
+def score_pages_quality(pages: list[str]) -> tuple[float, str]:
+    """Length-weighted mean of page scores.
+
+    Pages without text do not dilute the score, but a document missing text on too many
+    pages cannot be "good", and one with almost no text at all is "poor".
+    """
+    texts = [page for page in pages if page.strip()]
+    if not texts:
+        return 0.0, "failed"
+    weights = [sum(1 for ch in page if not ch.isspace()) for page in texts]
+    scores = [score_text_quality(page)[0] for page in texts]
+    score = sum(s * w for s, w in zip(scores, weights, strict=True)) / sum(weights)
+    if safe_ratio(len(texts), len(pages)) < MIN_PAGE_COVERAGE:
+        score = min(score, CAUTION_CAP)
+    if sum(ch.isalnum() for page in texts for ch in page) < MIN_TEXT_CHARS:
+        score = min(score, USABLE_SCORE - 0.01)
+    return score, label_for_score(score)
+
+
+def extract_pdf_text_sample(path: Path, max_pages: int = 3) -> list[str]:
     try:
         from pypdf import PdfReader  # type: ignore
 
         reader = PdfReader(str(path))
-        chunks: list[str] = []
-        for page in reader.pages[:max_pages]:
-            page_text = page.extract_text() or ""
-            if page_text:
-                chunks.append(page_text)
-        return "\n".join(chunks)
+        return [page.extract_text() or "" for page in reader.pages[:max_pages]]
     except Exception:
-        return ""
+        return []
 
 
 def detect_text_artifact(doc_id: str, source_path: str, text_dir: Path) -> Path | None:
@@ -124,20 +168,20 @@ def detect_text_artifact(doc_id: str, source_path: str, text_dir: Path) -> Path 
     return None
 
 
-def read_artifact_text(path: Path) -> str:
+def read_artifact_pages(path: Path) -> list[str]:
     if path.suffix.lower() == ".json":
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
-            return ""
+            return []
         if isinstance(payload, dict) and isinstance(payload.get("pages"), list):
             texts = []
             for page in payload["pages"]:
                 if isinstance(page, dict):
                     texts.append(str(page.get("text", "")))
-            return "\n".join(texts)
-        return json.dumps(payload, ensure_ascii=False)
-    return path.read_text(encoding="utf-8", errors="ignore")
+            return texts
+        return [json.dumps(payload, ensure_ascii=False)]
+    return [path.read_text(encoding="utf-8", errors="ignore")]
 
 
 def ensure_headers(headers: list[str], additions: list[str]) -> list[str]:
@@ -182,7 +226,7 @@ def run_moment1(rows: list[dict[str, str]]) -> dict[str, object]:
             continue
 
         sample = extract_pdf_text_sample(path)
-        score, label = score_text_quality(sample)
+        score, label = score_pages_quality(sample)
         row["ocr_m1_score"] = f"{score:.3f}"
         row["ocr_m1_label"] = label
         row["ocr_m1_notes"] = "based on sample extracted text from first pages"
@@ -216,8 +260,8 @@ def run_moment2(rows: list[dict[str, str]], text_dir: Path) -> dict[str, object]
                 label_counter["failed"] = label_counter.get("failed", 0) + 1
             continue
 
-        text = read_artifact_text(artifact)
-        score, label = score_text_quality(text)
+        pages = read_artifact_pages(artifact)
+        score, label = score_pages_quality(pages)
         row["ocr_m2_score"] = f"{score:.3f}"
         row["ocr_m2_notes"] = f"artifact={artifact.name}"
         row["ocr_quality"] = label

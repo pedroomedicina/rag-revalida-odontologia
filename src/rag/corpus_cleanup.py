@@ -13,10 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 JUNK_NAME_RE = re.compile(r"(^\._)|(^\.ds_store$)|(^thumbs\.db$)|(~$)|(^~\$)", re.IGNORECASE)
-DUP_HINT_RE = re.compile(r"(\(\d+\))|(\bcopy\b)|(\bcopia\b)", re.IGNORECASE)
+# Not \b: "_" is a word character, so \bcopia\b misses "guia_copia".
+DUP_HINT_RE = re.compile(r"\(\d+\)|(?<![^\W_])(?:copy|copia)(?![^\W_])", re.IGNORECASE)
 NON_SAFE_CHARS_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 PDF_PAGE_RE = re.compile(rb"/Type\s*/Page\b")
-COPY_HINT_RE = re.compile(r"(\(\d+\))|(\bcopy\b)|(\bcopia\b)|(_\d+$)|(__\d+$)", re.IGNORECASE)
+TITLE_SEPARATORS_RE = re.compile(r"[._-]+")
+# Applied to keys whose only separator is "_": "copia_de_x" / "x_copia".
+COPY_PREFIX_RE = re.compile(r"^(?:copia_de|copy_of)_")
+COPY_WORD_RE = re.compile(r"(?:^|_)(?:copy|copia)(?=_|$)")
+TRAILING_NUMBER_RE = re.compile(r"_\d+$")
 
 
 @dataclass(frozen=True)
@@ -53,11 +58,13 @@ def normalized_title_key(path: Path) -> str:
     stem = "".join(ch for ch in stem if not unicodedata.combining(ch))
     stem = stem.lower()
     stem = stem.replace("&", " and ")
-    stem = NON_SAFE_CHARS_RE.sub("_", stem).strip("._-")
-    stem = re.sub(r"_+", "_", stem)
+    stem = NON_SAFE_CHARS_RE.sub("_", stem)
+    # One separator, so "Guía - X", "Guia_X" and "guia.x" share a key.
+    stem = TITLE_SEPARATORS_RE.sub("_", stem).strip("_")
     # Common "copy-ish" markers from exported/resaved files.
-    stem = COPY_HINT_RE.sub("", stem).strip("._-")
-    stem = re.sub(r"_+", "_", stem)
+    stem = COPY_PREFIX_RE.sub("", stem)
+    stem = COPY_WORD_RE.sub("", stem).strip("_")
+    stem = TRAILING_NUMBER_RE.sub("", stem)
     # Common conversion artifacts in names, e.g. ".docx.pdf".
     stem = re.sub(r"_(docx|pptx|xlsx|txt)$", "", stem)
     return stem or "file"
