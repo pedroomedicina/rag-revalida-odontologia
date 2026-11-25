@@ -32,7 +32,7 @@ Pipeline code lives in `src/rag/`; `scripts/` holds thin CLI wrappers. Known def
 
 ### Current state
 - prep pipeline, chunking, indexing, retrieval, and answering are implemented end to end
-- open defects: index never deletes stale rows on re-chunk, near-duplicate resave detection, OCR quality scoring, and citation validator gaps
+- open defects: index never deletes stale rows on re-chunk, and citation validator gaps
 - next active focus: fix the open defects, then build a gold evaluation set and a retrieval recall baseline
 
 ---

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 def test_pipeline_completes(prep_run):
     assert prep_run.returncode == 0, prep_run.stdout
@@ -91,7 +89,6 @@ def test_pdf_without_text_layer_goes_through_ocr_fallback(prep_run):
     assert any(step.startswith("ocr_ocrmypdf:") for step in trace)
 
 
-@pytest.mark.known_bug("near-duplicate 'copia' resave is not detected")
 def test_near_duplicate_resave_is_reported(prep_run):
     cleanup = prep_run.cleanup_report
     assert cleanup["near_duplicate_pdf_resave"]["candidate_pairs_count"] >= 1
